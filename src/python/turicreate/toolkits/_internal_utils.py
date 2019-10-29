@@ -96,18 +96,18 @@ def _find_only_column_of_type(sframe, target_type, type_name, col_name):
     raised. The name and type of the target column should be provided as
     strings for the purpose of error feedback.
     """
-    image_column_name = None
+    found_column_name = None
     if type(target_type) != list:
         target_type = [target_type]
     for name, ctype in zip(sframe.column_names(), sframe.column_types()):
         if ctype in target_type:
-            if image_column_name is not None:
+            if found_column_name is not None:
                 raise ToolkitError('No "{col_name}" column specified and more than one {type_name} column in "dataset". Can not infer correct {col_name} column.'.format(col_name=col_name, type_name=type_name))
-            image_column_name = name
-    if image_column_name is None:
+            found_column_name = name
+    if found_column_name is None:
         raise ToolkitError('No "{col_name}" column specified and no column with expected type "{type_name}" is found.'.format(col_name=col_name, type_name=type_name)
             + ' "datasets" consists of columns with types: '+ ', '.join([x.__name__ for x in sframe.column_types()])+'.')
-    return image_column_name
+    return found_column_name
 
 def _find_only_image_column(sframe):
     """
