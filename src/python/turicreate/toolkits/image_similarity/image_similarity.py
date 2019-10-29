@@ -166,7 +166,7 @@ def create(dataset, label = None, feature = None, model = 'resnet-50', verbose =
 
 class ImageSimilarityModel(_CustomModel):
     """
-    An trained model that is ready to use for similarity. This model should not
+    A trained model that is ready to use for similarity. This model should not
     be constructed directly.
     """
 
