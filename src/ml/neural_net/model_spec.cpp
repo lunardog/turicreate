@@ -20,8 +20,8 @@ namespace neural_net {
 
 namespace {
 
-using CoreML::Specification::BorderAmounts_EdgeSizes;
 using CoreML::Specification::BatchnormLayerParams;
+using CoreML::Specification::BorderAmounts_EdgeSizes;
 using CoreML::Specification::ConvolutionLayerParams;
 using CoreML::Specification::InnerProductLayerParams;
 using CoreML::Specification::Model;
@@ -29,8 +29,9 @@ using CoreML::Specification::NeuralNetwork;
 using CoreML::Specification::NeuralNetworkImageScaler;
 using CoreML::Specification::NeuralNetworkLayer;
 using CoreML::Specification::NeuralNetworkPreprocessing;
-using CoreML::Specification::PoolingLayerParams;
 using CoreML::Specification::PaddingLayerParams;
+using CoreML::Specification::Pipeline;
+using CoreML::Specification::PoolingLayerParams;
 using CoreML::Specification::SamePadding;
 using CoreML::Specification::UniDirectionalLSTMLayerParams;
 using CoreML::Specification::UpsampleLayerParams;
@@ -817,7 +818,7 @@ void model_spec::add_exp(const std::string& name, const std::string& input) {
 }
 
 void model_spec::add_scale(const std::string& name, const std::string& input,
-                           const std::array<size_t, 3>& shape_c_h_w,
+                           const std::vector<size_t>& shape_c_h_w,
                            weight_initializer scale_initializer_fn) {
 
   NeuralNetworkLayer* layer = impl_->add_layers();
@@ -827,7 +828,7 @@ void model_spec::add_scale(const std::string& name, const std::string& input,
 
   CoreML::Specification::ScaleLayerParams* params = layer->mutable_scale();
   size_t size = 1;
-  for (size_t i = 0; i < 3; ++i) {
+  for (size_t i = 0; i < shape_c_h_w.size(); ++i) {
     params->add_shapescale(shape_c_h_w[i]);
     size *= shape_c_h_w[i];
   }
@@ -972,6 +973,17 @@ void model_spec::add_preprocessing(const std::string& feature_name,
   layer->set_featurename(feature_name);
   NeuralNetworkImageScaler* image_scaler = layer->mutable_scaler();
   image_scaler->set_channelscale(image_scale);
+}
+
+pipeline_spec::pipeline_spec(std::unique_ptr<Pipeline> impl)
+    : impl_(std::move(impl)) {}
+
+pipeline_spec::pipeline_spec(pipeline_spec&&) = default;
+pipeline_spec& pipeline_spec::operator=(pipeline_spec&&) = default;
+pipeline_spec::~pipeline_spec() = default;
+
+std::unique_ptr<Pipeline> pipeline_spec::move_coreml_spec() && {
+  return std::move(impl_);
 }
 
 }  // neural_net

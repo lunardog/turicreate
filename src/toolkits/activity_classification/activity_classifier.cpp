@@ -16,6 +16,7 @@
 #include <core/logging/logger.hpp>
 #include <core/util/string_util.hpp>
 #include <model_server/lib/variant_deep_serialize.hpp>
+#include <timer/timer.hpp>
 #include <toolkits/coreml_export/neural_net_models_exporter.hpp>
 #include <toolkits/evaluation/metrics.hpp>
 #include <toolkits/util/training_utils.hpp>
@@ -26,6 +27,7 @@ namespace activity_classification {
 namespace {
 
 using coreml::MLModelWrapper;
+using neural_net::ac_parameters;
 using neural_net::compute_context;
 using neural_net::float_array_map;
 using neural_net::lstm_weight_initializers;
@@ -49,34 +51,6 @@ constexpr size_t NUM_CONV_FILTERS = 64;
 constexpr size_t LSTM_HIDDEN_SIZE = 200;
 constexpr size_t FULLY_CONNECTED_HIDDEN_SIZE = 128;
 constexpr float LSTM_CELL_CLIP_THRESHOLD = 50000.f;
-
-
-// These are the fixed values that the Python implementation currently passes
-// into TCMPS.
-// TODO: These should be exposed in a way that facilitates experimentation.
-// TODO: A struct instead of a map would be nice, too.
-// TODO: And that should really happen before we deploy to Apple platforms where
-//       float and int don't have the same size.
-float_array_map get_training_config(size_t prediction_window,
-                                    int random_seed) {
-  static_assert(sizeof(float) == sizeof(int),
-                "Passing random seed assumes float and int have same size.");
-  float random_seed_float = *reinterpret_cast<float*>(&random_seed);
-
-  return {
-    { "ac_pred_window", shared_float_array::wrap(prediction_window) },
-    { "ac_seq_len", shared_float_array::wrap(NUM_PREDICTIONS_PER_CHUNK) },
-    { "mode", shared_float_array::wrap(0.f) },  // kLowLevelModeTrain
-    { "random_seed", shared_float_array::wrap(random_seed_float) },
-  };
-}
-float_array_map get_inference_config(size_t prediction_window) {
-  return {
-    { "ac_pred_window", shared_float_array::wrap(prediction_window) },
-    { "ac_seq_len", shared_float_array::wrap(NUM_PREDICTIONS_PER_CHUNK) },
-    { "mode", shared_float_array::wrap(1.f) },  // kLowLevelModeInference
-  };
-}
 
 size_t count_correct_predictions(size_t num_classes, const shared_float_array& output_chunk,
     const shared_float_array& label_chunk, size_t num_samples, size_t prediction_window) {
@@ -135,7 +109,7 @@ void activity_classifier::save_impl(oarchive& oarc) const {
   variant_deep_save(state, oarc);
 
   // Save neural net weights.
-  oarc << nn_spec_->export_params_view();
+  oarc << read_model_spec()->export_params_view();
 }
 
 void activity_classifier::load_version(iarchive& iarc, size_t version) {
@@ -148,6 +122,7 @@ void activity_classifier::load_version(iarchive& iarc, size_t version) {
   bool use_random_init = false;
   nn_spec_ = init_model(use_random_init);
   nn_spec_->update_params(nn_params);
+  nn_spec_synchronized_ = true;
 }
 
 void activity_classifier::init_options(
@@ -187,6 +162,18 @@ void activity_classifier::init_options(
       FLEX_UNDEFINED,
       std::numeric_limits<int>::min(),
       std::numeric_limits<int>::max());
+  options.create_boolean_option(
+      "verbose",
+      "If set to False, the progress table is hidden.",
+      true,
+      true);
+  options.create_integer_option(
+      "num_sessions",
+      "Number of sessions.",
+      FLEX_UNDEFINED,
+      0,
+      std::numeric_limits<int>::max(),
+      true);
 
   // Validate user-provided options.
   options.set_options(opts);
@@ -224,7 +211,7 @@ std::tuple<gl_sframe, gl_sframe> activity_classifier::random_split_by_session(
   // session. The boolean filter is a pseudorandom function of the session_id
   // and the global seed above, allowing the train-test split to vary across
   // runs using the same dataset.
-  auto random_session_pick = [fraction](size_t session_id_hash) {
+  auto random_session_pick = [fraction](uint32_t session_id_hash) {
     std::default_random_engine generator(session_id_hash);
     std::uniform_real_distribution<float> dis(0.f, 1.f);
     return dis(generator) < fraction;
@@ -308,21 +295,37 @@ std::tuple<float, float> activity_classifier::compute_validation_metrics(
   return std::make_tuple(average_val_accuracy, average_val_loss);
 }
 
-
 void activity_classifier::init_table_printer(bool has_validation) {
-  if (has_validation) {
-    training_table_printer_.reset(
-        new table_printer({{"Iteration", 12},
-                           {"Train Accuracy", 12},
-                           {"Train Loss", 12},
-                           {"Validation Accuracy", 12},
-                           {"Validation Loss", 12},
-                           {"Elapsed Time", 12}}));
-  } else {
-    training_table_printer_.reset(new table_printer({{"Iteration", 12},
-                                                     {"Train Accuracy", 12},
-                                                     {"Train Loss", 12},
-                                                     {"Elapsed Time", 12}}));
+  if (read_state<bool>("verbose")) {
+    if (has_validation) {
+      if (show_loss_) {
+        training_table_printer_.reset(
+            new table_printer({{"Iteration", 12},
+                               {"Train Accuracy", 12},
+                               {"Train Loss", 12},
+                               {"Validation Accuracy", 12},
+                               {"Validation Loss", 12},
+                               {"Elapsed Time", 12}}));
+
+      } else {
+        training_table_printer_.reset(
+            new table_printer({{"Iteration", 12},
+                               {"Train Accuracy", 12},
+                               {"Validation Accuracy", 12},
+                               {"Elapsed Time", 12}}));
+      }
+    } else {
+      if (show_loss_) {
+        training_table_printer_.reset(
+            new table_printer({{"Iteration", 12},
+                               {"Train Accuracy", 12},
+                               {"Train Loss", 12},
+                               {"Elapsed Time", 12}}));
+      } else {
+        training_table_printer_.reset(new table_printer(
+            {{"Iteration", 12}, {"Train Accuracy", 12}, {"Elapsed Time", 12}}));
+      }
+    }
   }
 }
 
@@ -331,31 +334,59 @@ void activity_classifier::train(
     std::string session_id_column_name, variant_type validation_data,
     std::map<std::string, flexible_type> opts)
 {
+
+  turi::timer time_object;
+  time_object.start();
+
   // Instantiate the training dependencies: data iterator, compute context,
   // backend NN model.
-  init_train(data, target_column_name, session_id_column_name, validation_data,
-             opts);
+  init_training(data, target_column_name, session_id_column_name,
+                validation_data, opts);
 
   // Perform all the iterations at once.
   flex_int max_iterations = read_state<flex_int>("max_iterations");
   while (read_state<flex_int>("training_iterations") < max_iterations) {
-    perform_training_iteration();
+    iterate_training();
   }
 
+  finalize_training();
+
+  variant_map_type state_update;
+  state_update["training_time"] = time_object.current_time();
+  add_or_update_state(state_update);
+
+  logprogress_stream << "Training complete" << std::endl;
+  logprogress_stream << "Total Time Spent: "
+                     << read_state<flex_float>("training_time") << std::endl;
+}
+
+// iterate_training() performs a complete epoch, synchronizing with the GPU. As
+// a result, no explicit synchronization is needed. We expose this method just
+// for consistency with other models, like object_detector.
+void activity_classifier::synchronize_training() {}
+
+const model_spec* activity_classifier::read_model_spec() const {
+  if (training_model_ && !nn_spec_synchronized_) {
+    float_array_map trained_weights = training_model_->export_weights();
+    nn_spec_->update_params(trained_weights);
+    nn_spec_synchronized_ = true;
+  }
+  return nn_spec_.get();
+}
+
+void activity_classifier::finalize_training() {
   // Finish printing progress.
-  training_table_printer_->print_footer();
-  training_table_printer_.reset();
-
-
-  // Sync trained weights to our local storage of the NN weights.
-  float_array_map trained_weights = training_model_->export_weights();
-  nn_spec_->update_params(trained_weights);
+  if (training_table_printer_) {
+    training_table_printer_->print_footer();
+    training_table_printer_.reset();
+  }
 
   variant_map_type state_update;
 
   // Update the state with recall, precision and confusion matrix for training
   // data
   gl_sarray train_predictions = predict(training_data_, "probability_vector");
+  flex_string target_column_name = read_state<flex_string>("target");
   variant_map_type train_metric = evaluation::compute_classifier_metrics(
       training_data_, target_column_name, "report", train_predictions,
       {{"classes", read_state<flex_list>("classes")}});
@@ -377,8 +408,8 @@ void activity_classifier::train(
     }
   }
 
+  state_update["verbose"] = read_state<bool>("verbose");
   add_or_update_state(state_update);
-
 }
 
 gl_sarray activity_classifier::predict(gl_sframe data,
@@ -391,7 +422,8 @@ gl_sarray activity_classifier::predict(gl_sframe data,
 
   // Bind the data to a data iterator.
   std::unique_ptr<data_iterator> data_it =
-      create_iterator(data, /* requires_labels */ false, /* is_train */ false,
+      create_iterator(data, /* requires_labels */ false,
+                      /* infer_class_labels */ false, /* is_train */ false,
                       /* use_data_augmentation */ false);
 
   // Accumulate the class probabilities for each prediction window.
@@ -436,13 +468,16 @@ gl_sframe activity_classifier::predict_per_window(gl_sframe data,
 
   // Bind the data to a data iterator.
   std::unique_ptr<data_iterator> data_it =
-      create_iterator(data, /* requires_labels */ false, /* is_train */ false,
+      create_iterator(data, /* requires_labels */ false,
+                      /* infer_class_labels */ false, /* is_train */ false,
                       /* use_data_augmentation */ false);
 
   // Accumulate the class probabilities for each prediction window.
   gl_sframe raw_preds_per_window = perform_inference(data_it.get());
+  std::string session_id_column_name = read_state<std::string>("session_id");
   gl_sframe result =
-      gl_sframe({{"session_id", raw_preds_per_window["session_id"]},
+      gl_sframe({{session_id_column_name, raw_preds_per_window["session_id"]},
+                 {"prediction_id", raw_preds_per_window["prediction_id"]},
                  {"probability_vector", raw_preds_per_window["preds"]}});
 
   if (output_type == "class") {
@@ -461,7 +496,8 @@ gl_sframe activity_classifier::predict_per_window(gl_sframe data,
   return result;
 }
 
-
+// TODO: This implementation would ideally just post-process the return value of
+// predict.
 gl_sframe activity_classifier::classify(gl_sframe data,
                                         std::string output_frequency) {
   if (output_frequency != "per_row" &&
@@ -473,7 +509,8 @@ gl_sframe activity_classifier::classify(gl_sframe data,
 
   // perform inference
   std::unique_ptr<data_iterator> data_it =
-      create_iterator(data, /* requires_labels */ false, /* is_train */ false,
+      create_iterator(data, /* requires_labels */ false,
+                      /* infer_class_labels */ false, /* is_train */ false,
                       /* use_data_augmentation */ false);
   gl_sframe raw_preds_per_window = perform_inference(data_it.get());
 
@@ -504,9 +541,12 @@ gl_sframe activity_classifier::classify(gl_sframe data,
   // create the result
   gl_sframe result = gl_sframe();
   if (output_frequency == "per_window") {
-    result = gl_sframe({{"exp_id", raw_preds_per_window["session_id"]},
-                        {"class", raw_preds_per_window["class"]},
-                        {"probability", raw_preds_per_window["probability"]}});
+    std::string session_id_column_name = read_state<std::string>("session_id");
+    result =
+        gl_sframe({{session_id_column_name, raw_preds_per_window["session_id"]},
+                   {"prediction_id", raw_preds_per_window["prediction_id"]},
+                   {"class", raw_preds_per_window["class"]},
+                   {"probability", raw_preds_per_window["probability"]}});
   } else {
     size_t class_column_index = raw_preds_per_window.column_index("class");
     size_t prob_column_index = raw_preds_per_window.column_index("probability");
@@ -551,7 +591,8 @@ gl_sframe activity_classifier::predict_topk(gl_sframe data,
 
   // data inference
   std::unique_ptr<data_iterator> data_it =
-      create_iterator(data, /* requires_labels */ false, /* is_train */ false,
+      create_iterator(data, /* requires_labels */ false,
+                      /* infer_class_labels */ false, /* is_train */ false,
                       /* use_data_augmentation */ false);
   gl_sframe raw_preds_per_window = perform_inference(data_it.get());
 
@@ -640,10 +681,10 @@ gl_sframe activity_classifier::predict_topk(gl_sframe data,
     stacked_rank = stacked_rank.stack("rank", "rank");
     result.add_column(stacked_rank["rank"], "rank");
   } else {
-    // add "exp_id" and "prediction_id" if the output_frequency is per_window
-    result.add_column(raw_preds_per_window["session_id"], "exp_id");
-    result.add_column(gl_sarray::from_sequence(0, raw_preds_per_window.size()),
-                      "prediction_id");
+    // add session ID and prediction ID if the output_frequency is per_window
+    result.add_column(raw_preds_per_window["session_id"],
+                      read_state<std::string>("session_id"));
+    result.add_column(raw_preds_per_window["prediction_id"], "prediction_id");
     result.add_column(raw_preds_per_window["class"], "class");
     result = result.stack("class", "class");
     gl_sframe rank_per_row = gl_sframe({{"rank", raw_preds_per_window["rank"]}})
@@ -673,20 +714,15 @@ variant_map_type activity_classifier::evaluate(gl_sframe data,
 
 
 std::shared_ptr<MLModelWrapper> activity_classifier::export_to_coreml(
-    std::string filename)
+    std::string filename, std::string short_desc,
+    std::map<std::string, flexible_type> additional_user_defined)
 {
   std::shared_ptr<MLModelWrapper> model_wrapper =
       export_activity_classifier_model(
-          *nn_spec_,
-          read_state<flex_int>("prediction_window"),
-          read_state<flex_list>("features"),
-          LSTM_HIDDEN_SIZE,
-          read_state<flex_list>("classes"),
-          read_state<flex_string>("target"));
+          *read_model_spec(), read_state<flex_int>("prediction_window"),
+          read_state<flex_list>("features"), LSTM_HIDDEN_SIZE,
+          read_state<flex_list>("classes"), read_state<flex_string>("target"));
 
-  // Add "user-defined" metadata.
-  // TODO: Should we also be adding the non-user-defined keys, such as
-  // "turicreate_version" and "shortDescription", or is that up to the frontend?
   const flex_list& features_list = read_state<flex_list>("features");
   const flex_string features_string =
       join(std::vector<std::string>(features_list.begin(),
@@ -700,8 +736,13 @@ std::shared_ptr<MLModelWrapper> activity_classifier::export_to_coreml(
       {"type", "activity_classifier"},
       {"version", 2},
   };
+  for(const auto& kvp : additional_user_defined) {
+       user_defined_metadata.emplace_back(kvp.first, kvp.second);
+  }
+
   model_wrapper->add_metadata({
-      {"user_defined", std::move(user_defined_metadata)}
+      {"short_description", short_desc},
+      {"user_defined", std::move(user_defined_metadata)},
   });
 
   if (!filename.empty()) {
@@ -810,16 +851,17 @@ void activity_classifier::import_from_custom_model(
   bool use_random_init = false;
   nn_spec_ = init_model(use_random_init);
   nn_spec_->update_params(nn_params);
+  nn_spec_synchronized_ = true;
   model_data.erase(model_iter);
 }
 
 std::unique_ptr<data_iterator> activity_classifier::create_iterator(
-    gl_sframe data, bool requires_labels, bool is_train,
-    bool use_data_augmentation) const {
+    gl_sframe data, bool requires_labels, bool infer_class_labels,
+    bool is_train, bool use_data_augmentation) const {
   data_iterator::parameters data_params;
   data_params.data = std::move(data);
 
-  if (!is_train) {
+  if (!infer_class_labels) {
     data_params.class_labels = read_state<flex_list>("classes");
   }
 
@@ -864,11 +906,21 @@ std::unique_ptr<model_spec> activity_classifier::init_model(
     std::seed_seq seed_seq{read_state<int>("random_seed")};
     random_engine = std::mt19937(seed_seq);
   }
-  result->add_channel_concat(
-      "features",
-      std::vector<std::string>(features_list.begin(), features_list.end()));
-  result->add_reshape("reshape", "features",
-                      {{1, num_features, 1, prediction_window}});
+
+  if (features_list.size() == 1) {
+    // Single feature column
+    const flex_string& feature_column_name = features_list.front();
+    std::string single_input_feature{feature_column_name};
+    result->add_reshape("reshape", single_input_feature,
+                        {{1, num_features, 1, prediction_window}});
+  } else {
+    // Multiple feature columns. Add concatenate layer to concat all columns.
+    result->add_channel_concat(
+        "features",
+        std::vector<std::string>(features_list.begin(), features_list.end()));
+    result->add_reshape("reshape", "features",
+                        {{1, num_features, 1, prediction_window}});
+  }
 
   weight_initializer initializer = zero_weight_initializer();
   lstm_weight_initializers lstm_initializer =
@@ -981,11 +1033,10 @@ activity_classifier::init_data(gl_sframe data, variant_type validation_data,
   return std::make_tuple(train_data,val_data);
 }
 
-void activity_classifier::init_train(
+void activity_classifier::init_training(
     gl_sframe data, std::string target_column_name,
     std::string session_id_column_name, variant_type validation_data,
-    std::map<std::string, flexible_type> opts)
-{
+    std::map<std::string, flexible_type> opts) {
   // Extract feature names from options.
   std::vector<std::string> feature_column_names;
   auto features_it = opts.find("features");
@@ -996,6 +1047,12 @@ void activity_classifier::init_train(
 
     // Don't pass "features" to init_options, which doesn't recognize it.
     opts.erase(features_it);
+  }
+
+  auto show_loss_it = opts.find("_show_loss");
+  if (show_loss_it != opts.end()) {
+    show_loss_ = show_loss_it->second;
+    opts.erase(show_loss_it);
   }
 
   // Read user-specified options.
@@ -1013,7 +1070,6 @@ void activity_classifier::init_train(
       init_data(data, validation_data, session_id_column_name);
 
   // Begin printing progress.
-  // TODO: Make progress printing optional.
   init_table_printer(!validation_data_.empty());
 
   add_or_update_state({{"session_id", session_id_column_name},
@@ -1025,15 +1081,17 @@ void activity_classifier::init_train(
   bool use_data_augmentation = read_state<bool>("use_data_augmentation");
   training_data_iterator_ =
       create_iterator(training_data_, /* requires_labels */ true,
-                      /* is_train */ true, use_data_augmentation);
+                      /* infer_class_labels */ true, /* is_train */ true,
+                      use_data_augmentation);
 
   add_or_update_state({{"classes", training_data_iterator_->class_labels()}});
 
   // Bind the validation data to a data iterator.
   if (!validation_data_.empty()) {
-    validation_data_iterator_ = create_iterator(
-        validation_data_, /* requires_labels */ true, /* is_train */ false,
-        /* use_data_augmentation */ false);
+    validation_data_iterator_ =
+        create_iterator(validation_data_, /* requires_labels */ true,
+                        /* infer_class_labels */ false, /* is_train */ false,
+                        /* use_data_augmentation */ false);
   } else {
     validation_data_iterator_ = nullptr;
   }
@@ -1044,15 +1102,15 @@ void activity_classifier::init_train(
     log_and_throw("No neural network compute context provided");
   }
 
-  // Report to the user what GPU(s) is being used.
-  std::vector<std::string> gpu_names = training_compute_context_->gpu_names();
-  print_training_device(gpu_names);
+  training_compute_context_->print_training_device_info();
 
   // Set additional model fields.
   add_or_update_state({
       {"features", training_data_iterator_->feature_names()},
       {"num_classes", training_data_iterator_->class_labels().size()},
+      {"num_examples", training_data_.size()},
       {"num_features", training_data_iterator_->feature_names().size()},
+      {"num_sessions", training_data_iterator_->num_sessions()},
       {"training_iterations", 0},
   });
 
@@ -1060,21 +1118,22 @@ void activity_classifier::init_train(
   // the data iterator.
   bool use_random_init = true;
   nn_spec_ = init_model(use_random_init);
+  nn_spec_synchronized_ = true;
+
+  // Defining the struct for ac parameters
+  ac_parameters ac_params;
+  ac_params.batch_size = read_state<int>("batch_size");
+  ac_params.num_features = read_state<int>("num_features");
+  ac_params.prediction_window = read_state<int>("prediction_window");
+  ac_params.num_classes = read_state<int>("num_classes");
+  ac_params.num_predictions_per_chunk = NUM_PREDICTIONS_PER_CHUNK;
+  ac_params.random_seed = read_state<int>("random_seed");
+  ac_params.is_training = true;
+  ac_params.weights = read_model_spec()->export_params_view();
 
   // Instantiate the NN backend.
-  size_t samples_per_chunk =
-      read_state<flex_int>("prediction_window") * NUM_PREDICTIONS_PER_CHUNK;
-  training_model_ = training_compute_context_->create_activity_classifier(
-      /* n */     read_state<flex_int>("batch_size"),
-      /* c_in */  read_state<flex_int>("num_features"),
-      /* h_in */  1,
-      /* w_in */  samples_per_chunk,
-      /* c_out */ read_state<flex_int>("num_classes"),
-      /* h_out */ 1,
-      /* w_out */ NUM_PREDICTIONS_PER_CHUNK,
-      get_training_config(read_state<flex_int>("prediction_window"),
-                          read_state<int>("random_seed")),
-      nn_spec_->export_params_view());
+  training_model_ =
+      training_compute_context_->create_activity_classifier(ac_params);
 
   // Print the header last, after any logging triggered by initialization above.
   if (training_table_printer_) {
@@ -1082,11 +1141,69 @@ void activity_classifier::init_train(
   }
 }
 
-void activity_classifier::perform_training_iteration() {
+void activity_classifier::resume_training(gl_sframe data,
+                                          variant_type validation_data) {
+  // Perform validation split if necessary.
+  flex_string session_id_column_name = read_state<flex_string>("session_id");
+  std::tie(training_data_, validation_data_) =
+      init_data(data, validation_data, session_id_column_name);
 
+  // Begin printing progress.
+  init_table_printer(!validation_data_.empty());
+
+  // Bind the data to a data iterator.
+  bool use_data_augmentation = read_state<bool>("use_data_augmentation");
+  training_data_iterator_ =
+      create_iterator(training_data_, /* requires_labels */ true,
+                      /* infer_class_labels */ false, /* is_train */ true,
+                      use_data_augmentation);
+
+  // Bind the validation data to a data iterator.
+  if (!validation_data_.empty()) {
+    validation_data_iterator_ =
+        create_iterator(validation_data_, /* requires_labels */ true,
+                        /* infer_class_labels */ false, /* is_train */ false,
+                        /* use_data_augmentation */ false);
+  } else {
+    validation_data_iterator_ = nullptr;
+  }
+
+  // Instantiate the compute context.
+  training_compute_context_ = create_compute_context();
+  if (training_compute_context_ == nullptr) {
+    log_and_throw("No neural network compute context provided");
+  }
+
+  training_compute_context_->print_training_device_info();
+
+  // Defining the struct for ac parameters
+  ac_parameters ac_params;
+  ac_params.batch_size = read_state<int>("batch_size");
+  ac_params.num_features = read_state<int>("num_features");
+  ac_params.prediction_window = read_state<int>("prediction_window");
+  ac_params.num_classes = read_state<int>("num_classes");
+  ac_params.num_predictions_per_chunk = NUM_PREDICTIONS_PER_CHUNK;
+  ac_params.random_seed = read_state<int>("random_seed");
+  ac_params.is_training = true;
+  ac_params.weights = read_model_spec()->export_params_view();
+
+  // Instantiate the NN backend.
+  training_model_ =
+      training_compute_context_->create_activity_classifier(ac_params);
+
+  // Print the header last, after any logging triggered by initialization above.
+  if (training_table_printer_) {
+    training_table_printer_->print_header();
+  }
+}
+
+void activity_classifier::iterate_training() {
   // Training must have been initialized.
   ASSERT_TRUE(training_data_iterator_ != nullptr);
   ASSERT_TRUE(training_model_ != nullptr);
+
+  // Invalidate any local copy of the model.
+  nn_spec_synchronized_ = false;
 
   const size_t batch_size = read_state<flex_int>("batch_size");
   const size_t iteration_idx = read_state<flex_int>("training_iterations");
@@ -1173,52 +1290,67 @@ void activity_classifier::perform_training_iteration() {
   if (validation_data_iterator_) {
     add_or_update_state({
         {"validation_accuracy", average_val_accuracy},
-        {"validation_log_loss", average_val_loss},
+        {"validation_log_loss", average_val_loss}
     });
   }
 
   if (training_table_printer_) {
     if (validation_data_iterator_) {
-      training_table_printer_->print_progress_row(
-          iteration_idx, iteration_idx + 1, average_batch_accuracy,
-          average_batch_loss, average_val_accuracy, average_val_loss,
-          progress_time());
+      if (show_loss_) {
+        training_table_printer_->print_progress_row(
+            iteration_idx, iteration_idx + 1, average_batch_accuracy,
+            average_batch_loss, average_val_accuracy, average_val_loss,
+            progress_time());
+      } else {
+        training_table_printer_->print_progress_row(
+            iteration_idx, iteration_idx + 1, average_batch_accuracy,
+            average_val_accuracy, progress_time());
+      }
     } else {
-      training_table_printer_->print_progress_row(
-          iteration_idx, iteration_idx + 1, average_batch_accuracy,
-          average_batch_loss, progress_time());
+      if (show_loss_) {
+        training_table_printer_->print_progress_row(
+            iteration_idx, iteration_idx + 1, average_batch_accuracy,
+            average_batch_loss, progress_time());
+      } else {
+        training_table_printer_->print_progress_row(
+            iteration_idx, iteration_idx + 1, average_batch_accuracy,
+            progress_time());
+      }
     }
   }
 
   training_data_iterator_->reset();
-
-  }
+}
 
 gl_sframe activity_classifier::perform_inference(data_iterator *data) const {
   // Open a new SFrame for writing.
-  gl_sframe_writer writer({"session_id", "preds", "num_samples"},
-                          {data->session_id_type(), flex_type_enum::VECTOR,
-                           flex_type_enum::INTEGER},
-                          /* num_segments */ 1);
+  gl_sframe_writer writer(
+      {"session_id", "prediction_id", "preds", "num_samples"},
+      {data->session_id_type(), flex_type_enum::INTEGER, flex_type_enum::VECTOR,
+       flex_type_enum::INTEGER},
+      /* num_segments */ 1);
 
-  size_t prediction_window = read_state<size_t>("prediction_window");
-  size_t num_classes = read_state<size_t>("num_classes");
+  int prediction_window = read_state<int>("prediction_window");
+  int num_classes = read_state<int>("num_classes");
 
   // Allocate a buffer into which to write the class probabilities.
   flex_vec preds(num_classes);
 
+  // Defining the struct for ac parameters
+  ac_parameters ac_params;
+  ac_params.batch_size = read_state<int>("batch_size");
+  ac_params.num_features = read_state<int>("num_features");
+  ac_params.prediction_window = read_state<int>("prediction_window");
+  ac_params.num_classes = num_classes;
+  ac_params.num_predictions_per_chunk = NUM_PREDICTIONS_PER_CHUNK;
+  ac_params.random_seed = read_state<int>("random_seed");
+  ac_params.is_training = false;
+  ac_params.weights = read_model_spec()->export_params_view();
+
   // Initialize the NN backend.
   std::unique_ptr<compute_context> ctx = create_compute_context();
-  std::unique_ptr<model_backend> backend = ctx->create_activity_classifier(
-      /* n */     read_state<flex_int>("batch_size"),
-      /* c_in */  read_state<flex_int>("num_features"),
-      /* h_in */  1,
-      /* w_in */  NUM_PREDICTIONS_PER_CHUNK * prediction_window,
-      /* c_out */ num_classes,
-      /* h_out */ 1,
-      /* w_out */ NUM_PREDICTIONS_PER_CHUNK,
-      get_inference_config(prediction_window),
-      nn_spec_->export_params_view());
+  std::unique_ptr<model_backend> backend =
+      ctx->create_activity_classifier(ac_params);
 
   // To support double buffering, use a queue of pending inference results.
   std::queue<result> pending_batches;
@@ -1251,13 +1383,14 @@ gl_sframe activity_classifier::perform_inference(data_iterator *data) const {
           output_ptr += num_classes;
 
           // Compute how many samples this prediction applies to.
-          size_t num_samples = std::min(prediction_window,
-                                        info.num_samples - cumulative_samples);
+          size_t num_samples = std::min<size_t>(prediction_window,
+                                                info.num_samples - cumulative_samples);
           cumulative_samples += prediction_window ;
+          
           // Add a row to the output SFrame.
-          writer.write({ info.session_id, preds, num_samples },
+          flex_int prediction_id = info.chunk_index;
+          writer.write({info.session_id, prediction_id, preds, num_samples},
                        /* segment_id */ 0);
-
         }
       }
     }

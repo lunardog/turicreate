@@ -152,7 +152,7 @@ variant_map_type _activity_classifier_prepare_data_impl(const gl_sframe &data,
     }
 
     int chunk_size = prediction_window * predictions_in_chunk;
-    int feature_size = chunk_size * features.size();
+    size_t feature_size = chunk_size * features.size();
 
     // Build a dict pf the column order by column name, to later access within the iterator
     auto column_index_map = generate_column_index_map(data.column_names());
@@ -295,6 +295,12 @@ variant_map_type _activity_classifier_prepare_data_aug_impl(
     DASSERT_TRUE(data.contains_column(feat));
   }
 #endif
+
+  for (std::string feat : features) {
+    if (!data.contains_column(feat)) {
+      log_and_throw("Column name " + feat + " does not exist.");
+    }
+  }
 
   bool use_target = (target != "");
   DASSERT_TRUE(!use_target || data.contains_column(target));
@@ -516,10 +522,10 @@ simple_data_iterator::simple_data_iterator(const parameters &params)
       next_row_(range_iterator_.begin()),
       end_of_rows_(range_iterator_.end()),
       sample_in_row_(0),
+      num_chunks_in_row_(0),
       is_train_(params.is_train),
       use_data_augmentation_(params.use_data_augmentation),
-      random_engine_(params.random_seed)
-{}
+      random_engine_(params.random_seed) {}
 
 const flex_list& simple_data_iterator::feature_names() const {
   return data_.feature_names;
@@ -531,6 +537,10 @@ const flex_list& simple_data_iterator::class_labels() const {
 
 flex_type_enum simple_data_iterator::session_id_type() const {
   return data_.session_id_type;
+}
+
+const size_t simple_data_iterator::num_sessions() const {
+  return data_.num_sessions;
 }
 
 bool simple_data_iterator::has_next_batch() const {
@@ -630,13 +640,16 @@ data_iterator::batch simple_data_iterator::next_batch(size_t batch_size) {
 
     batch_info.emplace_back();
     batch_info.back().session_id = row[session_id_column_index];
+    batch_info.back().chunk_index = num_chunks_in_row_;
     batch_info.back().num_samples = end - sample_in_row_;
 
     sample_in_row_ = end;
+    ++num_chunks_in_row_;
 
     if (sample_in_row_ >= static_cast<size_t>(chunk_length)) {
       ++next_row_;
       sample_in_row_ = 0;
+      num_chunks_in_row_ = 0;
     }
   }
 
@@ -650,8 +663,8 @@ data_iterator::batch simple_data_iterator::next_batch(size_t batch_size) {
         std::move(labels), { batch_size, 1, num_predictions_per_chunk_, 1 });
     result.weights = shared_float_array::wrap(
         std::move(weights), { batch_size, 1, num_predictions_per_chunk_, 1 });
-    result.labels_per_row = shared_float_array::wrap( 
-        std::move(labels_per_row), { batch_size, 1, num_samples_per_chunk, 1 });
+    result.labels_per_row = shared_float_array::wrap(
+        std::move(labels_per_row), {batch_size, 1, num_samples_per_chunk, 1});
   }
 
   result.batch_info = std::move(batch_info);

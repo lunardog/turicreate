@@ -6,20 +6,23 @@
 #
 
 import turicreate as _tc
-from turicreate import extensions as _extensions
 from turicreate.toolkits._model import CustomModel as _CustomModel
-from turicreate.toolkits._model import PythonProxy as _PythonProxy
-from turicreate.toolkits.object_detector.object_detector import ObjectDetector as _ObjectDetector
-from turicreate.toolkits.one_shot_object_detector.util._augmentation import preview_synthetic_training_data as _preview_synthetic_training_data
+from turicreate.toolkits._model import (
+    PythonProxy as _PythonProxy,
+    ToolkitError as _ToolkitError,
+)
+from turicreate.toolkits.object_detector.object_detector import (
+    ObjectDetector as _ObjectDetector,
+)
+from turicreate.toolkits.one_shot_object_detector.util._augmentation import (
+    preview_synthetic_training_data as _preview_synthetic_training_data,
+)
 import turicreate.toolkits._internal_utils as _tkutl
 
 
-def create(data,
-           target,
-           backgrounds=None,
-           batch_size=0,
-           max_iterations=0,
-           verbose=True):
+def create(
+    data, target, backgrounds=None, batch_size=0, max_iterations=0, verbose=True
+):
     """
     Create a :class:`OneShotObjectDetector` model. Note: The One Shot Object Detector
     is currently in beta.
@@ -61,39 +64,51 @@ def create(data,
         >>> test_data['predictions'] = model.predict(test_data)
     """
     if not isinstance(data, _tc.SFrame) and not isinstance(data, _tc.Image):
-        raise TypeError("'data' must be of type SFrame or Image.")
+        raise TypeError("'data' must be of type SFrame or tc.Image.")
+    if isinstance(data, _tc.SFrame) and len(data) == 0:
+        raise _ToolkitError("'data' can not be an empty SFrame")
+
     augmented_data = _preview_synthetic_training_data(data, target, backgrounds)
-    model = _tc.object_detector.create( augmented_data,
-                                        batch_size=batch_size,
-                                        max_iterations=max_iterations,
-                                        verbose=verbose)
+
+    model = _tc.object_detector.create(
+        augmented_data,
+        batch_size=batch_size,
+        max_iterations=max_iterations,
+        verbose=verbose,
+    )
+
     if isinstance(data, _tc.SFrame):
         num_starter_images = len(data)
     else:
         num_starter_images = 1
+
     state = {
         "detector": model,
         "target": target,
         "num_classes": model.num_classes,
         "num_starter_images": num_starter_images,
-        "_detector_version": _ObjectDetector._PYTHON_OBJECT_DETECTOR_VERSION,
-        }
+        "_detector_version": _ObjectDetector._CPP_OBJECT_DETECTOR_VERSION,
+    }
     return OneShotObjectDetector(state)
 
-class OneShotObjectDetector(_CustomModel): 
+
+class OneShotObjectDetector(_CustomModel):
     """
     An trained model that is ready to use for classification, exported to
     Core ML, or for feature extraction.
 
     This model should not be constructed directly.
     """
+
     _PYTHON_ONE_SHOT_OBJECT_DETECTOR_VERSION = 1
 
     def __init__(self, state):
         # We use PythonProxy here so that we get tab completion
         self.__proxy__ = _PythonProxy(state)
 
-    def predict(self, dataset, confidence_threshold=0.25, iou_threshold=None, verbose=True):
+    def predict(
+        self, dataset, confidence_threshold=0.25, iou_threshold=0.45, verbose=True
+    ):
         """
         Predict object instances in an SFrame of images.
 
@@ -143,13 +158,20 @@ class OneShotObjectDetector(_CustomModel):
             >>> predictions_with_bounding_boxes.explore()
 
         """
-        return self.__proxy__['detector'].predict(dataset=dataset,
-            confidence_threshold=confidence_threshold, iou_threshold=iou_threshold, verbose=verbose)
+        return self.__proxy__["detector"].predict(
+            dataset=dataset,
+            confidence_threshold=confidence_threshold,
+            iou_threshold=iou_threshold,
+            verbose=verbose,
+        )
 
-    def export_coreml(self, filename,
-            include_non_maximum_suppression = True,
-            iou_threshold = None,
-            confidence_threshold = None):
+    def export_coreml(
+        self,
+        filename,
+        include_non_maximum_suppression=True,
+        iou_threshold=None,
+        confidence_threshold=None,
+    ):
         """
         Save the model in Core ML format. The Core ML model takes an image of
         fixed size as input and produces two output arrays: `confidence` and
@@ -208,11 +230,29 @@ class OneShotObjectDetector(_CustomModel):
         --------
         >>> model.export_coreml('one_shot.mlmodel')
         """
-        from coremltools.models.utils import save_spec as _save_spec
-        model = self.__proxy__['detector']._create_coreml_model(include_non_maximum_suppression=include_non_maximum_suppression, iou_threshold=iou_threshold, confidence_threshold=confidence_threshold)
-        model.description.metadata.shortDescription = 'One Shot ' + model.description.metadata.shortDescription
-        model.description.metadata.userDefined["type"] = 'OneShotObjectDetector'
-        _save_spec(model, filename)
+        from turicreate.toolkits import _coreml_utils
+
+        additional_user_defined_metadata = _coreml_utils._get_tc_version_info()
+        short_description = _coreml_utils._mlmodel_short_description("Object Detector")
+        options = {
+            "include_non_maximum_suppression": include_non_maximum_suppression,
+        }
+
+        options["version"] = self._PYTHON_ONE_SHOT_OBJECT_DETECTOR_VERSION
+
+        if confidence_threshold is not None:
+            options["confidence_threshold"] = confidence_threshold
+
+        if iou_threshold is not None:
+            options["iou_threshold"] = iou_threshold
+
+        additional_user_defined_metadata = _coreml_utils._get_tc_version_info()
+        short_description = _coreml_utils._mlmodel_short_description(
+            "One Shot Object Detector"
+        )
+        self.__proxy__["detector"].__proxy__.export_to_coreml(
+            filename, short_description, additional_user_defined_metadata, options
+        )
 
     def _get_version(self):
         return self._PYTHON_ONE_SHOT_OBJECT_DETECTOR_VERSION
@@ -228,16 +268,17 @@ class OneShotObjectDetector(_CustomModel):
 
         # We don't know how to serialize a Python class, hence we need to
         # reduce the detector to the proxy object before saving it.
-        state['detector'] = state['detector']._get_native_state()
+        state["detector"] = {"detector_model": state["detector"].__proxy__}
         return state
 
     @classmethod
     def _load_version(cls, state, version):
-        assert(version == cls._PYTHON_ONE_SHOT_OBJECT_DETECTOR_VERSION)
+        assert version == cls._PYTHON_ONE_SHOT_OBJECT_DETECTOR_VERSION
         # we need to undo what we did at save and turn the proxy object
         # back into a Python class
-        state['detector'] = _ObjectDetector._load_version(
-            state['detector'], state["_detector_version"])
+        state["detector"] = _ObjectDetector._load_version(
+            state["detector"], state["_detector_version"]
+        )
         return OneShotObjectDetector(state)
 
     def __str__(self):
@@ -256,12 +297,58 @@ class OneShotObjectDetector(_CustomModel):
         Print a string description of the model when the model name is entered
         in the terminal.
         """
+
         width = 40
         sections, section_titles = self._get_summary_struct()
-        detector = self.__proxy__['detector']
-        out = _tkutl._toolkit_repr_print(detector, sections, section_titles,
-                                         width=width, class_name='OneShotObjectDetector')
+        detector = self.__proxy__["detector"]
+        out = _tkutl._toolkit_repr_print(
+            detector,
+            sections,
+            section_titles,
+            width=width,
+            class_name="OneShotObjectDetector",
+        )
         return out
+
+    def summary(self, output=None):
+        """
+        Print a summary of the model. The summary includes a description of
+        training data, options, hyper-parameters, and statistics measured
+        during model creation.
+
+        Parameters
+        ----------
+        output : str, None
+            The type of summary to return.
+
+            - None or 'stdout' : print directly to stdout.
+
+            - 'str' : string of summary
+
+            - 'dict' : a dict with 'sections' and 'section_titles' ordered
+              lists. The entries in the 'sections' list are tuples of the form
+              ('label', 'value').
+
+        Examples
+        --------
+        >>> m.summary()
+        """
+        from turicreate.toolkits._internal_utils import (
+            _toolkit_serialize_summary_struct,
+        )
+
+        if output is None or output == "stdout":
+            pass
+        elif output == "str":
+            return self.__repr__()
+        elif output == "dict":
+            return _toolkit_serialize_summary_struct(
+                self.__proxy__["detector"], *self._get_summary_struct()
+            )
+        try:
+            print(self.__repr__())
+        except:
+            return self.__class__.__name__
 
     def _get_summary_struct(self):
         """
@@ -281,19 +368,19 @@ class OneShotObjectDetector(_CustomModel):
               The order matches that of the 'sections' object.
         """
         model_fields = [
-            ('Number of classes', 'num_classes'),
-            ('Input image shape', 'input_image_shape'),
+            ("Number of classes", "num_classes"),
+            ("Input image shape", "input_image_shape"),
         ]
         data_fields = [
-            ('Number of synthetically generated examples', 'num_examples'),
-            ('Number of synthetically generated bounding boxes', 'num_bounding_boxes'),
+            ("Number of synthetically generated examples", "num_examples"),
+            ("Number of synthetically generated bounding boxes", "num_bounding_boxes"),
         ]
         training_fields = [
-            ('Training time', '_training_time_as_string'),
-            ('Training iterations', 'training_iterations'),
-            ('Training epochs', 'training_epochs'),
-            ('Final loss (specific to model)', 'training_loss'),
+            ("Training time", "_training_time_as_string"),
+            ("Training iterations", "training_iterations"),
+            ("Training epochs", "training_epochs"),
+            ("Final loss (specific to model)", "training_loss"),
         ]
 
-        section_titles = ['Model summary', 'Synthetic data summary', 'Training summary']
-        return([model_fields, data_fields, training_fields], section_titles)
+        section_titles = ["Model summary", "Synthetic data summary", "Training summary"]
+        return ([model_fields, data_fields, training_fields], section_titles)

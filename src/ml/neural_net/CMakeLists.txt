@@ -1,4 +1,4 @@
-project(unity_toolkits)
+project(Turi)
 
 # The unity_neural_net library provides a platform-agnostic interface to
 # neural-network inference and training backends. It provides a factory method
@@ -31,6 +31,7 @@ if(APPLE AND HAS_MPS AND NOT TC_BUILD_IOS)
       mps_weight.mm
       mps_device_manager.m
       mps_descriptor_utils.m
+      mps_od_backend.mm
       style_transfer/mps_style_transfer.m
       style_transfer/mps_style_transfer_backend.mm
       style_transfer/mps_style_transfer_utils.m
@@ -42,6 +43,7 @@ if(APPLE AND HAS_MPS AND NOT TC_BUILD_IOS)
       style_transfer/mps_style_transfer_vgg_16_block_1_node.mm
       style_transfer/mps_style_transfer_vgg_16_block_2_node.mm
       style_transfer/mps_style_transfer_vgg_16_network.m
+      style_transfer/mps_style_transfer_weights.m
     REQUIRES
       unity_core
       ${ACCELERATE}

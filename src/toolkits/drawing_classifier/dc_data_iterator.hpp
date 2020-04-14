@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include <core/data/flexible_type/flexible_type.hpp>
 #include <core/data/sframe/gl_sframe.hpp>
 #include <ml/neural_net/float_array.hpp>
 
@@ -36,12 +37,12 @@ class data_iterator {
     /**
      * The name of the column containing the target variable.
      *
-     * If empty, then the output will not contain labels or weights.
+     * If empty, then the output will not contain labels.
      */
     std::string target_column_name;
 
     /** The name of the feature column. */
-    std::string feature_column_name;
+    std::string feature_column_name{"feature"};
 
     /** The name of the predictions column. */
     std::string predictions_column_name;
@@ -51,10 +52,8 @@ class data_iterator {
      *
      * If empty, then the labels will be inferred from the data. If non-empty,
      * an exception will be thrown upon encountering an unexpected label.
-     *
-     * \TODO: This should be a flex_list to accomodate integer labels!
      */
-    std::vector<std::string> class_labels;
+    flex_list class_labels;
 
     /** Whether this is training data or not. */
     bool is_train = true;
@@ -67,6 +66,9 @@ class data_iterator {
 
     /** Determines results of shuffle operations if enabled. */
     int random_seed = 0;
+
+    // normalization factor for input data
+    float scale_factor = 1 / 255.f;
   };
 
   /** Defines the output of a data_iterator. */
@@ -87,6 +89,13 @@ class data_iterator {
      * Each row is the target.
      */
     neural_net::shared_float_array targets;
+
+    /**
+     * An array with shape: (requested_batch_size, 1)
+     *
+     * Each row is the weight associated with the target.
+     */
+    neural_net::shared_float_array weights;
 
     /**
      * An array with shape: (requested_batch_size, 1)
@@ -122,10 +131,8 @@ class data_iterator {
    * Returns a sorted list of the unique "label" values found in the
    * target.
    */
-  virtual const std::vector<std::string>& class_labels() const = 0;
+  virtual const flex_list& class_labels() const = 0;
 
-  virtual const std::unordered_map<std::string, int>& class_to_index_map()
-      const = 0;
 };
 
 /**
@@ -149,30 +156,26 @@ class simple_data_iterator : public data_iterator {
 
   void reset() override;
 
-  const std::vector<std::string>& class_labels() const override {
+  const flex_list& class_labels() const override {
     return target_properties_.classes;
-  }
-
-  const std::unordered_map<std::string, int>& class_to_index_map()
-      const override {
-    return target_properties_.class_to_index_map;
   }
 
  private:
   struct target_properties {
-    std::vector<std::string> classes;
-    std::unordered_map<std::string, int> class_to_index_map;
+    flex_list classes;
   };
 
   target_properties compute_properties(
-      const gl_sarray& targets, std::vector<std::string> expected_class_labels);
+      const gl_sframe& data, const std::string& target_column_name,
+      const flex_list& expected_class_labels);
 
   gl_sframe data_;
-  const int target_index_;
-  const int predictions_index_;
-  const int feature_index_;
+  const int64_t target_index_;
+  const int64_t predictions_index_; // -1 if not present
+  const int64_t feature_index_;
   const bool repeat_;
   const bool shuffle_;
+  const float scale_factor_ = 1 / 255.0f;
 
   const target_properties target_properties_;
 

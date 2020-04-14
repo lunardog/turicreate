@@ -1,12 +1,14 @@
-project(TuriCreateObjC)
+project(Turi)
 
-if(APPLE AND HAS_MLCUSTOMMODEL)
+if(APPLE AND HAS_COREML_CUSTOM_MODEL)
+  message(STATUS "Enabling Recommender and AudioPreprocessing targets.")
 
   make_library(Recommender
     SOURCES
-      TuriCreateObjC.m
+      TuriCreateObjC.mm
       recommender_initialization.cpp
       ${_TC_COMMON_OBJECTS}
+      $<TARGET_OBJECTS:capi>
     REQUIRES
       ${_TC_COMMON_REQUIREMENTS}
     SHARED
@@ -17,7 +19,9 @@ if(APPLE AND HAS_MLCUSTOMMODEL)
 
   make_library(AudioPreprocessing
     SOURCES
-      AudioPreprocessing.m
+      AudioPreprocessing.mm
+      ${_TC_COMMON_OBJECTS}
+      $<TARGET_OBJECTS:capi>
     REQUIRES
       ${ACCELERATE}
       ${_TC_COMMON_REQUIREMENTS}
@@ -30,17 +34,14 @@ if(APPLE AND HAS_MLCUSTOMMODEL)
   # Adding sources here allows us to unit test these custom models in python.
   make_library(objcapi OBJECT
     SOURCES
-      AudioPreprocessing.m
-      TuriCreateObjC.m
+      AudioPreprocessing.mm
+      TuriCreateObjC.mm
+      ${_TC_COMMON_OBJECTS}
     REQUIRES
-      capi
+      ${_TC_COMMON_REQUIREMENTS}
       ${FOUNDATION}
       ${CORE_ML}
   )
-
-  target_compile_options(objcapi PUBLIC "-fobjc-arc")
-  target_compile_options(Recommender PUBLIC "-fobjc-arc")
-  target_compile_options(AudioPreprocessing PUBLIC "-fobjc-arc")
 
   if (CMAKE_BUILD_TYPE STREQUAL "Release")
     add_custom_command(TARGET Recommender
@@ -54,5 +55,10 @@ if(APPLE AND HAS_MLCUSTOMMODEL)
       COMMENT "Stripping Objective-C AudioPreprocessing library"
     )
   endif()
+else()
 
+  make_empty_library(Recommender)
+  make_empty_library(AudioPreprocessing)
+
+  message(STATUS "Skipping Recommender and AudioPreprocessing targets.")
 endif()

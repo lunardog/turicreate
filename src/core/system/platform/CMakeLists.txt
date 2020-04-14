@@ -1,4 +1,4 @@
-project(TuriPlatformDepedentcode)
+project(Turi)
 
 subdirs(
   crash_handler
@@ -7,7 +7,6 @@ subdirs(
   perf
   process
   shmipc
-  so_utils
   timer
   config
   )

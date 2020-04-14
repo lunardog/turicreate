@@ -24,16 +24,12 @@ namespace turi {
  *            with shape (3, image_height, image_width) and values in [0,1],
  *            output "confidence" with shape (num_predictions, num_classes),
  *            and "coordinates" with shape (num_predictions, 4).
- * \param user_defined_metadata Key-value pairs to add as user-defined metadata.
- *
- * \todo Should this also initialize non-user-defined metadata?
  * \todo Should model_spec include Model, not NeuralNetwork, so that the client
  *       is responsible for populating the inputs and outputs?
  */
 std::shared_ptr<coreml::MLModelWrapper> export_object_detector_model(
-    const neural_net::model_spec& nn_spec, size_t image_width,
-    size_t image_height, size_t num_classes, size_t num_predictions,
-    flex_dict user_defined_metadata, flex_list class_labels,
+    neural_net::pipeline_spec pipeline, size_t num_classes,
+    size_t num_predictions, flex_list class_labels,
     std::map<std::string, flexible_type> options);
 
 /** Wraps a trained activity classifier model_spec as a complete MLModel. */
@@ -45,7 +41,8 @@ std::shared_ptr<coreml::MLModelWrapper> export_activity_classifier_model(
 /** Wraps a trained style transfer model_spec as a complete MLModel. */
 std::shared_ptr<coreml::MLModelWrapper> export_style_transfer_model(
     const neural_net::model_spec& nn_spec, size_t image_width,
-    size_t image_height, flex_dict user_defined_metadata);
+    size_t image_height, bool include_flexible_shape,
+    std::string content_feature, std::string style_feature, size_t num_styles);
 
 /** Wraps a trained drawing classifier model_spec as a complete MLModel. */
 std::shared_ptr<coreml::MLModelWrapper> export_drawing_classifier_model(

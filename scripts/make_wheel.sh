@@ -12,7 +12,7 @@ WORKSPACE=${SCRIPT_DIR}/..
 build_type="release"
 
 # The build image version that will be used for building
-TC_BUILD_IMAGE_1004=$(sh $WORKSPACE/scripts/get_docker_image.sh --ubuntu=10.04)
+TC_BUILD_IMAGE_CENTOS_6=$(bash $WORKSPACE/scripts/get_docker_image.sh --centos=6)
 
 unknown_option() {
   echo "Unknown option $1. Exiting."
@@ -32,19 +32,17 @@ print_help() {
   echo
   echo "  --skip_build             Skip the build process."
   echo
-  echo "  --skip_doc               Skip the generation of documentation."
-  echo
   echo "  --skip_smoke_test        Skip importing the wheel and running a quick smoke test."
   echo
   echo "  --debug                  Use debug build instead of release."
   echo
-  echo "  --docker-python2.7       Use docker to build for Python 2.7 in Ubuntu 10.04 with GCC 4.8."
+  echo "  --docker-python2.7       Use docker to build for Python 2.7 in CentOS 6 with Clang 8."
   echo
-  echo "  --docker-python3.5       Use docker to build for Python 3.5 in Ubuntu 10.04 with GCC 4.8."
+  echo "  --docker-python3.5       Use docker to build for Python 3.5 in CentOS 6 with Clang 8."
   echo
-  echo "  --docker-python3.6       Use docker to build for Python 3.6 in Ubuntu 10.04 with GCC 4.8."
+  echo "  --docker-python3.6       Use docker to build for Python 3.6 in CentOS 6 with Clang 8."
   echo
-  echo "  --docker-python3.7       Use docker to build for Python 3.7 in Ubuntu 10.04 with GCC 4.8."
+  echo "  --docker-python3.7       Use docker to build for Python 3.7 in CentOS 6 with Clang 8."
   echo
   echo "  --num_procs=n            Specify the number of proceses to run in parallel."
   echo
@@ -65,7 +63,6 @@ while [ $# -gt 0 ]
     --skip_test)            SKIP_TEST=1;;
     --skip_cpp_test)        SKIP_CPP_TEST=1;;
     --skip_build)           SKIP_BUILD=1;;
-    --skip_doc)             SKIP_DOC=1;;
     --skip_smoke_test)      SKIP_SMOKE_TEST=1;;
     --release)              build_type="release";;
     --debug)                build_type="debug";;
@@ -102,17 +99,14 @@ if [[ -n "${USE_DOCKER}" ]]; then
   $WORKSPACE/scripts/create_docker_images.sh
 
   # set up arguments to make_wheel.sh within docker
-  # always skip smoke test since it (currently) fails on 10.04
-  # always skip doc gen since it (currently) fails on 10.04
+  # always skip smoke test since it (currently) fails on CentOS 6
+  # always skip doc gen since it (currently) fails on CentOS 6
   make_wheel_args="--build_number=$BUILD_NUMBER --num_procs=$NUM_PROCS --skip_test"
   if [[ -n $SKIP_BUILD ]]; then
     make_wheel_args="$make_wheel_args --skip_build"
   fi
   if [[ -n $SKIP_CPP_TEST ]]; then
     make_wheel_args="$make_wheel_args --skip_cpp_test"
-  fi
-  if [[ -n $SKIP_DOC ]]; then
-    make_wheel_args="$make_wheel_args --skip_doc"
   fi
   if [[ "$build_type" == "debug" ]]; then
     make_wheel_args="$make_wheel_args --debug"
@@ -124,31 +118,31 @@ if [[ -n "${USE_DOCKER}" ]]; then
   docker run --rm -m=8g \
     --mount type=bind,source=$WORKSPACE,target=/build,consistency=delegated \
     -e "VIRTUALENV=virtualenv --python=python${DOCKER_PYTHON}" \
-    ${TC_BUILD_IMAGE_1004} \
+    ${TC_BUILD_IMAGE_CENTOS_6} \
     /build/scripts/make_wheel.sh \
     $make_wheel_args
 
   # Delete env to force re-creation of virtualenv if we are running tests next
-  # (to prevent reuse of 10.04 virtualenv on 14.04/18.04)
+  # (to prevent reuse of CentOS 6 virtualenv on 14.04/18.04)
   docker run --rm -m=4g \
     --mount type=bind,source=$WORKSPACE,target=/build,consistency=delegated \
     -e "VIRTUALENV=virtualenv --python=python${DOCKER_PYTHON}" \
-    ${TC_BUILD_IMAGE_1004} \
+    ${TC_BUILD_IMAGE_CENTOS_6} \
     rm -rf /build/deps/env
 
   # Run the tests inside Docker (14.04) if desired
-  # 10.04 is not capable of passing turicreate unit tests currently
+  # CentOS 6 is not capable of passing turicreate unit tests currently
   if [[ -z $SKIP_TEST ]]; then
     # run the tests
     ./scripts/test_wheel.sh --docker-python${DOCKER_PYTHON}
   fi
 
   # Delete env to force re-creation of virtualenv for next build
-  # (to prevent reuse of 14.04/18.04 virtualenv on 10.04)
+  # (to prevent reuse of 14.04/18.04 virtualenv on CentOS 6)
   docker run --rm -m=4g \
     --mount type=bind,source=$WORKSPACE,target=/build,consistency=delegated \
     -e "VIRTUALENV=virtualenv --python=python${DOCKER_PYTHON}" \
-    ${TC_BUILD_IMAGE_1004} \
+    ${TC_BUILD_IMAGE_CENTOS_6} \
     rm -rf /build/deps/env
 
   exit 0
@@ -357,25 +351,6 @@ package_wheel() {
   echo -e "\n\n================= Done Packaging Wheel  ================\n\n"
 }
 
-
-# Generate docs
-generate_docs() {
-  echo -e "\n\n\n================= Generating Docs ================\n\n\n"
-
-  $PIP_EXECUTABLE install sphinx==1.6.5
-  $PIP_EXECUTABLE install sphinx-bootstrap-theme
-  $PIP_EXECUTABLE install numpydoc
-  SPHINXBUILD=${WORKSPACE}/$PYTHON_SCRIPTS/sphinx-build
-  cd ${WORKSPACE}
-  rm -rf pydocs
-  mkdir -p pydocs
-  cd pydocs
-  cp -R ${WORKSPACE}/src/python/doc/* .
-  make clean SPHINXBUILD=${SPHINXBUILD}
-  make html SPHINXBUILD=${SPHINXBUILD} || true
-  tar -czf ${TARGET_DIR}/turicreate_python_sphinx_docs.tar.gz *
-}
-
 set_build_number() {
   # set the build number
   cd ${WORKSPACE}/${build_type}/src/python/
@@ -413,6 +388,3 @@ source ${WORKSPACE}/scripts/python_env.sh $build_type
 
 package_wheel
 
-if [[ -z $SKIP_DOC ]]; then
-  generate_docs
-fi

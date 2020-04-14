@@ -1,4 +1,4 @@
-project(unity_toolkits)
+project(Turi)
 
 make_library(unity_util OBJECT
   SOURCES
@@ -8,7 +8,6 @@ make_library(unity_util OBJECT
     sframe_utils.cpp
     class_registrations.cpp
     random_sframe_generation.cpp
-    training_utils.cpp
   REQUIRES
     unity_core
 )

@@ -50,9 +50,9 @@ annotate_spec::Data ImageClassification::getItems(size_t start, size_t end) {
     flex_image img = flex_data.at(i).get<flex_image>();
     img = turi::image_util::encode_image(img);
 
-    size_t img_width = img.m_width;
-    size_t img_height = img.m_height;
-    size_t img_channels = img.m_channels;
+    int img_width = static_cast<int>(img.m_width);
+    int img_height = static_cast<int>(img.m_height);
+    int img_channels = static_cast<int>(img.m_channels);
 
     annotate_spec::Datum *datum = data.add_data();
     annotate_spec::ImageDatum *img_datum = datum->add_images();
@@ -197,9 +197,9 @@ annotate_spec::Similarity ImageClassification::get_similar_items(size_t index,
     flex_image img = data_sa[idx];
     img = turi::image_util::encode_image(img);
 
-    size_t img_width = img.m_width;
-    size_t img_height = img.m_height;
-    size_t img_channels = img.m_channels;
+    int img_width = static_cast<int>(img.m_width);
+    int img_height = static_cast<int>(img.m_height);
+    int img_channels = static_cast<int>(img.m_channels);
 
     annotate_spec::Datum *datum = similar.add_data();
     annotate_spec::ImageDatum *img_datum = datum->add_images();
@@ -263,7 +263,7 @@ bool ImageClassification::setAnnotations(
 
     switch (label.labelIdentifier_case()) {
     case annotate_spec::Label::LabelIdentifierCase::kIntLabel:
-      _addAnnotationToSFrame(sf_idx, label.intlabel());
+      _addAnnotationToSFrame(sf_idx, static_cast<int>(label.intlabel()));
       break;
     case annotate_spec::Label::LabelIdentifierCase::kStringLabel:
       _addAnnotationToSFrame(sf_idx, label.stringlabel());
@@ -284,8 +284,10 @@ void ImageClassification::_addAnnotationToSFrame(size_t index,
                                                  std::string label) {
   /* Assert that the column type is indeed of type flex_enum::STRING */
   size_t annotation_column_index = m_data->column_index(m_annotation_column);
-  DASSERT_EQ(m_data->dtype().at(annotation_column_index),
-             flex_type_enum::STRING);
+  if (m_data->select_column(annotation_column_index)->any()) {
+    DASSERT_EQ(m_data->dtype().at(annotation_column_index),
+              flex_type_enum::STRING);
+  }
 
   std::shared_ptr<unity_sarray> data_sarray =
       std::static_pointer_cast<unity_sarray>(

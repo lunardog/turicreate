@@ -10,7 +10,7 @@ Given a starter image (*left*), a one-shot object detector trained on this start
 
 ![Stop Sign vector and prediction images](images/stop_sign_sample.jpg) 
 
-Download the [stop_sign_starter.png](images/stop_sign_starter.png) image. Also Download [stop_sign_test1.jpg](images/stop_sign_test1.jpg) and [stop_sing_test2.jpg](images/stop_sign_test2.jpg)
+Download the [stop_sign_starter.png](images/stop_sign_starter.png) image. Also Download [stop_sign_test1.jpg](images/stop_sign_test1.jpg) and [stop_sign_test2.jpg](images/stop_sign_test2.jpg)
 
 ```python
 import turicreate as tc
@@ -38,7 +38,7 @@ test_images['annotated_predictions'] = \
 test_images.explore()
 
 # Save the model for later use in TuriCreate
-model.save('mymodel.model')
+model.save('stop-sign.model')
 
 # Export for use in Core ML
 model.export_coreml('MyCustomOneShotDetector.mlmodel')
